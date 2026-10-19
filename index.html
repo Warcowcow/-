@@ -1,0 +1,976 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { Wallet, PlusCircle, History, CheckCircle2, RotateCcw, Plus, Receipt, Trash2, AlertTriangle, Calculator, Clock } from 'lucide-react';
+
+// 初始預設數據 (已清空，等用家自己入)
+const initialVouchers = [];
+
+const platforms = [
+  { id: 'MPAY', name: 'MPay 澳門錢包', color: 'bg-orange-500', text: 'text-orange-600', border: 'border-orange-200' },
+  { id: 'BOC', name: 'BOC 中銀澳門', color: 'bg-red-600', text: 'text-red-600', border: 'border-red-200' },
+  { id: 'UEPAY', name: 'UEPay 極易付', color: 'bg-purple-600', text: 'text-purple-600', border: 'border-purple-200' },
+  { id: 'ALIPAY', name: 'Alipay 支付寶', color: 'bg-blue-500', text: 'text-blue-600', border: 'border-blue-200' },
+  { id: 'TAIFUNG', name: 'TaiFung 大豐銀行', color: 'bg-red-500', text: 'text-red-500', border: 'border-red-200' },
+  { id: 'ICBC', name: 'ICBC 工銀澳門', color: 'bg-red-700', text: 'text-red-700', border: 'border-red-200' },
+  { id: 'LUSO', name: 'Luso 國際銀行', color: 'bg-rose-600', text: 'text-rose-600', border: 'border-rose-200' },
+  { id: 'CGB', name: 'CGB 廣發銀行', color: 'bg-rose-500', text: 'text-rose-600', border: 'border-rose-200' },
+];
+
+// 平台 Logo 統一組件 (使用文字與漸層幾何形狀組合)
+const PlatformLogo = ({ id, className = "w-6 h-6 text-xs" }) => {
+  const getLogoProps = () => {
+    switch(id) {
+      case 'MPAY': return { text: 'M', bg: 'bg-gradient-to-br from-orange-400 to-orange-600', shape: 'rounded-xl' };
+      case 'BOC': return { text: '中', bg: 'bg-gradient-to-br from-red-500 to-red-700', shape: 'rounded-full' };
+      case 'UEPAY': return { text: 'U', bg: 'bg-gradient-to-br from-purple-500 to-purple-700', shape: 'rounded-xl' };
+      case 'ALIPAY': return { text: '支', bg: 'bg-gradient-to-br from-blue-400 to-blue-600', shape: 'rounded-xl' };
+      case 'TAIFUNG': return { text: '豐', bg: 'bg-gradient-to-br from-red-400 to-red-600', shape: 'rounded-full' };
+      case 'ICBC': return { text: '工', bg: 'bg-gradient-to-br from-red-600 to-red-800', shape: 'rounded-full' };
+      case 'LUSO': return { text: 'L', bg: 'bg-gradient-to-br from-rose-500 to-rose-700', shape: 'rounded-full' };
+      case 'CGB': return { text: '廣', bg: 'bg-gradient-to-br from-rose-400 to-rose-600', shape: 'rounded-full' };
+      default: return { text: '券', bg: 'bg-gray-500', shape: 'rounded-full' };
+    }
+  };
+  const { text, bg, shape } = getLogoProps();
+  return (
+    <div className={`flex items-center justify-center font-black text-white shadow-sm shrink-0 ${bg} ${shape} ${className}`}>
+      {text}
+    </div>
+  );
+}
+
+export default function App() {
+  const [vouchers, setVouchers] = useState(initialVouchers);
+  const [activeTab, setActiveTab] = useState('home');
+  
+  // 多選扣減狀態
+  const [selectedVoucherIds, setSelectedVoucherIds] = useState([]);
+  const [showUseConfirmModal, setShowUseConfirmModal] = useState(false);
+
+  // 新增消費劵表單狀態
+  const [newPlatform, setNewPlatform] = useState('MPAY');
+  const [newSelections, setNewSelections] = useState([]);
+
+  // 計數機狀態
+  const [calcInput, setCalcInput] = useState('');
+  const [selectedComboIndex, setSelectedComboIndex] = useState(0);
+
+  // 提示與重設狀態
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [toastMsg, setToastMsg] = useState('');
+
+  // 政府標準消費券面值
+  const govVoucherAmounts = [10, 20, 50, 100, 200];
+
+  // 當輸入消費總額改變時，重置選取的方案為推薦的第 1 個
+  useEffect(() => {
+    setSelectedComboIndex(0);
+  }, [calcInput]);
+
+  // 【核心邏輯】：計算該期消費劵的確切作廢時間 (星期四 23:59:59)
+  const getVoucherExpiryDate = (createdAt) => {
+    if (!createdAt) return new Date();
+    const createdDate = new Date(createdAt);
+    const day = createdDate.getDay(); // 0:Sun, 1:Mon, ..., 6:Sat
+    // 計算距離本期星期四(4)還有幾天 (週五5->6天, 週六6->5天, 週日0->4天... 週四4->0天)
+    const daysToThursday = (4 - day + 7) % 7;
+    
+    const expiryDate = new Date(createdDate);
+    expiryDate.setDate(createdDate.getDate() + daysToThursday);
+    expiryDate.setHours(23, 59, 59, 999); 
+    return expiryDate;
+  };
+
+  const isVoucherExpired = (createdAt) => {
+    if (!createdAt) return false;
+    return Date.now() > getVoucherExpiryDate(createdAt).getTime();
+  };
+
+  // 過濾出目前有效（未被使用且未過期）的消費劵
+  const validUnusedVouchers = useMemo(() => {
+    return vouchers.filter(v => !v.isUsed && !isVoucherExpired(v.createdAt));
+  }, [vouchers]);
+
+  // 計算目前所選平台已有的有效消費券數量，並限制最多 3 張
+  const currentPlatformCount = useMemo(() => {
+    return validUnusedVouchers.filter(v => v.platform === newPlatform).length;
+  }, [validUnusedVouchers, newPlatform]);
+
+  const remainingSlots = Math.max(0, 3 - currentPlatformCount);
+
+  // 統計數據
+  const totalAvailable = useMemo(() => 
+    validUnusedVouchers.reduce((sum, v) => sum + v.amount, 0)
+  , [validUnusedVouchers]);
+
+  const totalUsed = useMemo(() => 
+    vouchers.filter(v => v.isUsed).reduce((sum, v) => sum + v.amount, 0)
+  , [vouchers]);
+
+  // 按平台分組的可用餘額 (只計算有效未過期的)
+  const groupedAvailable = useMemo(() => {
+    const grouped = {};
+    platforms.forEach(p => grouped[p.id] = { ...p, vouchers: [], total: 0 });
+    
+    validUnusedVouchers.forEach(v => {
+      if(grouped[v.platform]) {
+        grouped[v.platform].vouchers.push(v);
+        grouped[v.platform].total += v.amount;
+      }
+    });
+    
+    return Object.values(grouped).sort((a, b) => b.total - a.total);
+  }, [validUnusedVouchers]);
+
+  // 將歷史記錄按「每次扣減 (時間相近)」分組
+  const groupedHistory = useMemo(() => {
+    const used = vouchers.filter(v => v.isUsed && v.usedAt).sort((a, b) => b.usedAt - a.usedAt);
+    const groups = [];
+    let currentGroup = null;
+
+    used.forEach(v => {
+      if (!currentGroup || Math.abs(currentGroup.date - v.usedAt) > 1000) {
+        if (currentGroup) groups.push(currentGroup);
+        currentGroup = {
+          date: v.usedAt,
+          id: v.usedAt.toString() + Math.random().toString(),
+          vouchers: [v],
+          totalAmount: v.amount
+        };
+      } else {
+        currentGroup.vouchers.push(v);
+        currentGroup.totalAmount += v.amount;
+      }
+    });
+    if (currentGroup) groups.push(currentGroup);
+    return groups;
+  }, [vouchers]);
+
+  const selectedTotalAmount = useMemo(() => {
+    return vouchers.filter(v => selectedVoucherIds.includes(v.id)).reduce((sum, v) => sum + v.amount, 0);
+  }, [vouchers, selectedVoucherIds]);
+
+  const toggleVoucherSelection = (id) => {
+    setSelectedVoucherIds(prev =>
+      prev.includes(id) ? prev.filter(vid => vid !== id) : [...prev, id]
+    );
+    if (navigator.vibrate) navigator.vibrate(20);
+  };
+
+  // 計數機核心邏輯：動態計算所有可行的消費劵配搭組合 (滿30扣10規則)
+  const { calcMaxAllowed, combinations } = useMemo(() => {
+    const spend = Number(calcInput);
+    if (isNaN(spend) || spend < 30) return { calcMaxAllowed: 0, combinations: [] };
+    
+    const maxAllowed = Math.floor(spend / 30) * 10;
+    const available = validUnusedVouchers;
+    let finalCombinations = [];
+
+    // 從最高可扣減額度往下找 (遞減10)，確保就算湊不滿最大值，也能給出次優解
+    for (let target = maxAllowed; target >= 10; target -= 10) {
+      let results = [];
+      let signatures = new Set();
+      // 只保留面額小於等於目標的券
+      const v = available.filter(val => val.amount <= target).sort((a,b) => b.amount - a.amount);
+
+      // DFS 尋找所有組合
+      const dfs = (index, currentSum, currentPath) => {
+        if (currentSum === target) {
+          // 利用特徵字串防止重複組合
+          const sig = currentPath.map(x => `${x.platform}-${x.amount}`).sort().join('|');
+          if (!signatures.has(sig)) {
+            signatures.add(sig);
+            results.push([...currentPath]);
+          }
+          return;
+        }
+        if (currentSum > target || index >= v.length) return;
+
+        // 包含當前券
+        currentPath.push(v[index]);
+        dfs(index + 1, currentSum + v[index].amount, currentPath);
+        currentPath.pop();
+
+        // 不包含當前券
+        dfs(index + 1, currentSum, currentPath);
+      };
+
+      dfs(0, 0, []);
+
+      if (results.length > 0) {
+        // 排序結果：1.單一平台優先 2.張數越少越好
+        results.sort((a, b) => {
+          const platformsA = new Set(a.map(x => x.platform)).size;
+          const platformsB = new Set(b.map(x => x.platform)).size;
+          if (platformsA !== platformsB) return platformsA - platformsB;
+          return a.length - b.length;
+        });
+        finalCombinations = results.slice(0, 6); // 最多展示 6 個不同選項
+        break; // 找到後就不再往下找次等扣減額度
+      }
+    }
+    return { calcMaxAllowed: maxAllowed, combinations: finalCombinations };
+  }, [calcInput, validUnusedVouchers]);
+
+  const bestCombination = combinations[selectedComboIndex] || combinations[0] || [];
+
+  const calcBreakdown = useMemo(() => {
+    if (!bestCombination.length || !calcInput) return null;
+    const totalSpend = Number(calcInput);
+    const totalDeduct = bestCombination.reduce((s, v) => s + v.amount, 0);
+    const actualPay = totalSpend - totalDeduct;
+
+    const platformGroups = {};
+    bestCombination.forEach(v => {
+      if (!platformGroups[v.platform]) {
+        platformGroups[v.platform] = {
+          platform: v.platform,
+          voucherTotal: 0,
+          vouchers: []
+        };
+      }
+      platformGroups[v.platform].voucherTotal += v.amount;
+      platformGroups[v.platform].vouchers.push(v);
+    });
+
+    const breakdown = Object.values(platformGroups).map(g => {
+      const minCharge = g.voucherTotal * 3;
+      return { ...g, minCharge, outOfPocket: minCharge - g.voucherTotal };
+    });
+
+    const totalMinCharge = totalDeduct * 3;
+    const leftover = totalSpend - totalMinCharge;
+
+    return { totalSpend, totalDeduct, actualPay, breakdown, leftover };
+  }, [bestCombination, calcInput]);
+
+  const handleCalcDeduct = () => {
+    if (bestCombination.length > 0) {
+      setSelectedVoucherIds(bestCombination.map(v => v.id));
+      setShowUseConfirmModal(true);
+    }
+  };
+
+  const confirmDeduction = () => {
+    const now = Date.now();
+    setVouchers(prev => prev.map(v =>
+      selectedVoucherIds.includes(v.id) ? { ...v, isUsed: true, usedAt: now } : v
+    ));
+    setSelectedVoucherIds([]);
+    setShowUseConfirmModal(false);
+    setToastMsg(`已成功扣減 $${selectedTotalAmount}`);
+    setTimeout(() => setToastMsg(''), 3000);
+    if (navigator.vibrate) navigator.vibrate([50, 50]);
+    
+    setCalcInput('');
+    setActiveTab('home');
+  };
+
+  const cancelSelection = () => {
+    setSelectedVoucherIds([]);
+  };
+
+  const handleUndoVoucher = (id) => {
+    const voucher = vouchers.find(v => v.id === id);
+    if (voucher && isVoucherExpired(voucher.createdAt)) {
+      setToastMsg("⚠️ 此消費券已過期（該期星期四已過），無法復原！");
+      setTimeout(() => setToastMsg(''), 3000);
+      return;
+    }
+
+    setVouchers(prev => prev.map(v => 
+      v.id === id ? { ...v, isUsed: false, usedAt: null } : v
+    ));
+  };
+
+  const handleDeleteVoucher = (id) => {
+    setVouchers(prev => prev.filter(v => v.id !== id));
+    setToastMsg("已刪除該消費券");
+    setTimeout(() => setToastMsg(''), 3000);
+  };
+
+  const handleSelectAmount = (amount) => {
+    if (newSelections.length < remainingSlots) {
+      setNewSelections(prev => [...prev, amount]);
+      if (navigator.vibrate) navigator.vibrate(10);
+    } else {
+      if (remainingSlots === 0) {
+        setToastMsg(`此平台已達 3 張上限，請先使用！`);
+      } else {
+        setToastMsg(`受限於現有餘額，本次最多只能再新增 ${remainingSlots} 張！`);
+      }
+      setTimeout(() => setToastMsg(''), 3000);
+    }
+  };
+
+  const handleRemoveSelection = (indexToRemove) => {
+    setNewSelections(prev => prev.filter((_, index) => index !== indexToRemove));
+  };
+
+  const handleAddVoucher = (e) => {
+    e.preventDefault();
+    if (newSelections.length === 0) {
+      setToastMsg("請先點擊選擇消費劵面額！");
+      setTimeout(() => setToastMsg(''), 3000);
+      return;
+    }
+
+    const now = Date.now();
+    const newVoucherObjects = newSelections.map((amount, idx) => ({
+      id: Math.random().toString(36).substr(2, 9) + idx,
+      platform: newPlatform,
+      amount: Number(amount),
+      isUsed: false,
+      createdAt: now,
+      usedAt: null
+    }));
+
+    setVouchers(prev => [...prev, ...newVoucherObjects]);
+    setNewSelections([]);
+    setToastMsg(`成功新增 ${newSelections.length} 張消費劵到 ${platforms.find(p => p.id === newPlatform)?.name}`);
+    setTimeout(() => setToastMsg(''), 3000);
+  };
+
+  const confirmReset = (type) => {
+    if (type === 'unused') {
+      setVouchers(prev => prev.filter(v => v.isUsed));
+      setToastMsg("已清空我的券包 (未使用)");
+    } else if (type === 'used') {
+      setVouchers(prev => prev.filter(v => !v.isUsed));
+      setToastMsg("已清空扣減記錄");
+    } else {
+      setVouchers([]);
+      setToastMsg("已清空所有資料");
+    }
+    setShowResetModal(false);
+    setTimeout(() => setToastMsg(''), 3000);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-gray-100 flex justify-center font-sans">
+      <div className="w-full max-w-md bg-white h-full shadow-2xl relative flex flex-col overflow-hidden">
+        
+        {/* Header */}
+        <div className="bg-emerald-600 text-white p-4 pb-5 rounded-b-[2rem] shadow-md z-10 shrink-0 relative">
+          <button 
+            onClick={() => setShowResetModal(true)}
+            className="absolute top-4 right-4 p-1.5 bg-white/20 rounded-full hover:bg-white/30 transition-colors"
+            title="清空重設"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+
+          <h1 className="text-lg font-bold mb-3 text-center tracking-wide">澳門消費劵管家</h1>
+          
+          <div className="bg-white/20 rounded-2xl p-3 flex flex-col items-center justify-center border border-white/30 backdrop-blur-sm mx-2">
+            <span className="text-xs font-medium opacity-90 mb-0.5">本期有效總餘額 (MOP)</span>
+            <span className="text-3xl font-extrabold tracking-tight">${totalAvailable}</span>
+          </div>
+          
+          <div className="mt-3 flex justify-between text-xs px-4">
+            <span className="opacity-90">歷史已用: ${totalUsed}</span>
+            <span className="opacity-90">可用張數: {validUnusedVouchers.length} 張</span>
+          </div>
+        </div>
+
+        {/* 內容區域 */}
+        <div className="flex-1 overflow-y-auto p-4 pb-24 space-y-5">
+          
+          {/* 首頁 - 可用消費劵 */}
+          {activeTab === 'home' && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <Wallet className="w-5 h-5 text-emerald-600" />
+                我的券包
+              </h2>
+              
+              {groupedAvailable.filter(g => g.total > 0).length === 0 ? (
+                <div className="text-center py-12 text-gray-500">
+                  <Receipt className="w-16 h-16 mx-auto text-gray-300 mb-3" />
+                  <p>目前沒有可用的消費劵</p>
+                  <button 
+                    onClick={() => setActiveTab('add')}
+                    className="mt-4 text-emerald-600 font-semibold"
+                  >
+                    去新增 +
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {groupedAvailable.map(platform => {
+                    if (platform.total === 0) return null;
+                    return (
+                      <div key={platform.id} className={`bg-white border ${platform.border} rounded-2xl p-4 shadow-sm relative overflow-hidden`}>
+                        <div className={`absolute top-0 left-0 w-1.5 h-full ${platform.color}`}></div>
+                        
+                        <div className="flex justify-between items-end mb-3 pl-2">
+                          <h3 className={`font-bold ${platform.text} flex items-center gap-2`}>
+                            <PlatformLogo id={platform.id} className="w-6 h-6 text-xs" />
+                            {platform.name}
+                          </h3>
+                          <span className="text-gray-500 text-sm font-medium">餘額: <span className="text-lg text-gray-800 font-bold">${platform.total}</span></span>
+                        </div>
+                        
+                        <div className="flex flex-wrap gap-2 pl-2 mt-3">
+                          {platform.vouchers.map(v => {
+                            const isSelected = selectedVoucherIds.includes(v.id);
+                            return (
+                              <button
+                                key={v.id}
+                                onClick={() => toggleVoucherSelection(v.id)}
+                                className={`flex items-center gap-1 px-3 py-1.5 rounded-lg font-bold text-sm shadow-sm active:scale-95 transition-all ${
+                                  isSelected
+                                    ? `ring-4 ring-emerald-400 scale-105 z-10 ${platform.color}`
+                                    : `${platform.color} opacity-90 hover:opacity-100`
+                                } text-white`}
+                                title={`到期日: ${getVoucherExpiryDate(v.createdAt).toLocaleDateString('zh-MO')} 23:59`}
+                              >
+                                ${v.amount}
+                                {isSelected && (
+                                  <span className="bg-white text-emerald-600 rounded-full p-0.5 ml-1 shadow-sm">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-gray-400 mt-3 pl-2">* 點擊面額按鈕選擇，可多選一併扣減</p>
+                      </div>
+                    );
+                  })}
+                  <div className="text-center pt-2 pb-4">
+                    <p className="text-xs text-gray-400 flex items-center justify-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      系統會於每週四 23:59 自動清零/隱藏過期之消費劵
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {}
+          {/* 新增消費劵 */}
+          {activeTab === 'add' && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <PlusCircle className="w-5 h-5 text-emerald-600" />
+                下期錄入 / 新增餘額
+              </h2>
+              
+              <form onSubmit={handleAddVoucher} className="bg-white rounded-2xl p-5 border border-gray-200 shadow-sm space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">選擇平台</label>
+                  <div className="flex gap-3 items-center">
+                    <PlatformLogo id={newPlatform} className="w-12 h-12 text-xl" />
+                    <select 
+                      value={newPlatform}
+                      onChange={(e) => {
+                        setNewPlatform(e.target.value);
+                        setNewSelections([]); // 切換平台時清空已選擇面額
+                      }}
+                      className="w-full border border-gray-300 rounded-xl p-3 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                    >
+                      {platforms.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2 flex justify-between items-center">
+                    <span>點擊選擇面額</span>
+                    <span className={`text-xs px-2 py-1 rounded-md font-bold ${remainingSlots > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-600'}`}>
+                      {remainingSlots > 0 ? `剩餘名額: ${remainingSlots - newSelections.length} / 3` : '名額已滿 (3/3)'}
+                    </span>
+                  </label>
+                  
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {govVoucherAmounts.map(amount => (
+                      <button
+                        type="button"
+                        key={amount}
+                        onClick={() => handleSelectAmount(amount)}
+                        disabled={newSelections.length >= remainingSlots}
+                        className={`flex-1 min-w-[60px] py-2 rounded-xl border font-bold text-sm transition-all shadow-sm ${
+                          newSelections.length >= remainingSlots 
+                            ? 'bg-gray-50 border-gray-100 text-gray-400 cursor-not-allowed' 
+                            : 'bg-white border-emerald-200 text-emerald-600 hover:bg-emerald-50 active:scale-95'
+                        }`}
+                      >
+                        + ${amount}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="min-h-[60px] bg-gray-50 border border-gray-200 border-dashed rounded-xl p-3 flex flex-wrap gap-2 items-center">
+                    {newSelections.length === 0 ? (
+                       <span className="text-gray-400 text-sm">{remainingSlots === 0 ? '該平台已達上限，請先使用消費券' : '請點擊上方按鈕加入面額...'}</span>
+                    ) : (
+                       newSelections.map((amount, idx) => (
+                         <div key={idx} className="bg-emerald-100 border border-emerald-200 text-emerald-800 px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-1 shadow-sm animate-in zoom-in-95">
+                           ${amount}
+                           <button 
+                             type="button" 
+                             onClick={() => handleRemoveSelection(idx)} 
+                             className="ml-1 text-emerald-500 hover:text-emerald-700 w-4 h-4 flex items-center justify-center rounded-full hover:bg-emerald-200"
+                           >
+                             &times;
+                           </button>
+                         </div>
+                       ))
+                    )}
+                    {newSelections.length === remainingSlots && remainingSlots > 0 && (
+                        <span className="text-xs text-orange-500 font-bold ml-auto animate-in fade-in">已達上限</span>
+                    )}
+                  </div>
+                  
+                  {/* 明確的週期規則提示框 */}
+                  <div className="mt-4 p-3 bg-blue-50 border border-blue-100 rounded-xl">
+                    <p className="text-xs text-blue-700 font-medium flex items-start gap-1.5 leading-relaxed">
+                      <Clock className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>週期規則：</strong>逢星期五、六、日可抽券。<br/>
+                        所有錄入的券將統一於<strong>該期星期四 23:59</strong> 自動作廢清零，下星期五重新計算新一期。
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button 
+                    type="submit"
+                    disabled={newSelections.length === 0}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-400 text-white font-bold py-3.5 rounded-xl shadow-md flex justify-center items-center gap-2 transition-colors active:scale-[0.98]"
+                  >
+                    <Plus className="w-5 h-5" />
+                    確認新增 {newSelections.length > 0 ? `(${newSelections.length}張)` : ''}
+                  </button>
+                </div>
+              </form>
+
+              {/* 已新增的消費券列表 (供檢查與刪除) */}
+              <div className="mt-6">
+                <h3 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                  <Wallet className="w-4 h-4 text-emerald-600" />
+                  已錄入的消費券 (未扣減)
+                </h3>
+                {validUnusedVouchers.length === 0 ? (
+                  <div className="text-center py-6 bg-white rounded-2xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+                    目前券包空空如也
+                  </div>
+                ) : (
+                  <div className="space-y-2 pb-4">
+                    {validUnusedVouchers.slice().sort((a, b) => b.createdAt - a.createdAt).map(v => {
+                      const pInfo = platforms.find(p => p.id === v.platform);
+                      return (
+                        <div key={v.id} className="flex justify-between items-center bg-white p-3 rounded-xl border border-gray-100 shadow-sm animate-in fade-in slide-in-from-bottom-2">
+                          <div className="flex items-center gap-3">
+                            <PlatformLogo id={pInfo?.id} className="w-9 h-9 text-sm" />
+                            <div>
+                              <span className="font-bold text-sm text-gray-800 flex items-center gap-2">
+                                {pInfo?.name}
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded text-white ${pInfo?.color}`}>${v.amount}</span>
+                              </span>
+                              <span className="text-[10px] text-gray-400 block mt-0.5">
+                                {new Date(v.createdAt).toLocaleTimeString('zh-MO', { hour: '2-digit', minute: '2-digit' })} 新增
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteVoucher(v.id)}
+                            className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                            title="刪除此券"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {}
+          {/* 歷史記錄 */}
+          {activeTab === 'history' && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <History className="w-5 h-5 text-emerald-600" />
+                扣減記錄
+              </h2>
+              
+              {groupedHistory.length === 0 ? (
+                <div className="text-center py-12 text-gray-500">
+                  <p>尚無使用記錄</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {groupedHistory.map(group => {
+                    const dateStr = new Date(group.date).toLocaleString('zh-MO', {
+                      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+                    });
+                    return (
+                      <div key={group.id} className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+                        <div className="bg-gray-50 px-4 py-2 border-b border-gray-100 flex justify-between items-center">
+                          <span className="text-xs text-gray-500 font-medium">{dateStr}</span>
+                          <span className="text-sm font-bold text-emerald-600">共扣減 ${group.totalAmount}</span>
+                        </div>
+                        <div className="divide-y divide-gray-50">
+                          {group.vouchers.map(v => {
+                            const platformInfo = platforms.find(p => p.id === v.platform);
+                            const expired = isVoucherExpired(v.createdAt); // 判斷原本是否已過期
+                            
+                            return (
+                              <div key={v.id} className="p-3 flex justify-between items-center bg-white">
+                                <div className="flex items-center gap-3">
+                                  <PlatformLogo id={platformInfo?.id} className="w-8 h-8 text-sm" />
+                                  <div>
+                                    <p className="font-bold text-sm text-gray-800 flex items-center gap-2">
+                                      {platformInfo?.name}
+                                      <span className={`text-[10px] px-1.5 py-0.5 rounded text-white ${platformInfo?.color}`}>${v.amount}</span>
+                                    </p>
+                                  </div>
+                                </div>
+                                
+                                <button 
+                                  onClick={() => handleUndoVoucher(v.id)}
+                                  disabled={expired}
+                                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                                    expired 
+                                      ? 'text-gray-300 bg-gray-50 cursor-not-allowed' 
+                                      : 'text-gray-400 hover:text-emerald-600 bg-gray-50 hover:bg-emerald-50'
+                                  }`}
+                                  title={expired ? "所屬期數已結束，無法復原" : "復原並退回券包"}
+                                >
+                                  {expired ? (
+                                    <>
+                                      <Clock className="w-3 h-3" />
+                                      已過期
+                                    </>
+                                  ) : (
+                                    <>
+                                      <RotateCcw className="w-3 h-3" />
+                                      復原
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {}
+          {/* 計數機頁面 */}
+          {activeTab === 'calc' && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <Calculator className="w-5 h-5 text-emerald-600" />
+                結帳計數機
+              </h2>
+              
+              <div className="bg-white rounded-2xl p-5 border border-gray-200 shadow-sm space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">本次消費總額 (MOP)</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">$</span>
+                    <input 
+                      type="number" 
+                      value={calcInput}
+                      onChange={(e) => setCalcInput(e.target.value)}
+                      placeholder="例如: 160"
+                      className="w-full border border-gray-300 rounded-xl p-3 pl-8 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none text-lg text-gray-700"
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    * 條件：滿 $30 扣 $10，滿 $60 扣 $20，滿 $150 扣 $50...
+                  </p>
+                </div>
+
+                <div className="pt-2 border-t border-gray-100">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-sm text-gray-600">最高可扣減額度：</span>
+                    <span className="font-bold text-gray-800">${calcMaxAllowed}</span>
+                  </div>
+                  <div className="flex justify-between items-center mb-4">
+                    <span className="text-sm text-gray-600">當前配搭扣減：</span>
+                    <span className="font-bold text-emerald-600">${bestCombination.reduce((s, v) => s + v.amount, 0)}</span>
+                  </div>
+                  
+                  {/* 多方案選擇列 */}
+                  {combinations.length > 1 && (
+                    <div className="mb-4">
+                      <p className="text-xs text-gray-500 mb-2 font-medium">發現多種組合，請選擇方案 ({combinations.length} 種)：</p>
+                      <div className="flex gap-2 overflow-x-auto pb-2 snap-x [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                        {combinations.map((comb, idx) => {
+                          const isSelected = selectedComboIndex === idx;
+                          const platformCount = new Set(comb.map(x => x.platform)).size;
+                          return (
+                            <button
+                              key={idx}
+                              onClick={() => setSelectedComboIndex(idx)}
+                              className={`snap-start shrink-0 px-3 py-2 rounded-xl text-left border transition-all ${
+                                isSelected
+                                  ? 'bg-emerald-50 border-emerald-500 shadow-sm ring-1 ring-emerald-500'
+                                  : 'bg-white border-gray-200 hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className={`text-sm font-bold flex items-center gap-1 ${isSelected ? 'text-emerald-700' : 'text-gray-700'}`}>
+                                方案 {idx + 1}
+                                {idx === 0 && <span className="text-[9px] bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded">推薦</span>}
+                              </div>
+                              <div className="text-[10px] text-gray-500 mt-1">
+                                {platformCount === 1 ? '單一平台' : '跨平台'} • {comb.length} 張
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {calcBreakdown && calcBreakdown.breakdown.length > 0 ? (
+                    <div className="space-y-3 mb-5">
+                      <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100">
+                        <div className="flex justify-between items-center text-sm mb-1">
+                          <span className="text-emerald-800 font-bold">實際需支付 (自付)：</span>
+                          <span className="text-2xl font-extrabold text-emerald-600">${calcBreakdown.actualPay}</span>
+                        </div>
+                        <div className="text-right text-[10px] text-emerald-700/70">
+                          (總消費 ${calcBreakdown.totalSpend} - 扣減 ${calcBreakdown.totalDeduct})
+                        </div>
+                      </div>
+
+                      <h4 className="text-sm font-bold text-gray-700 border-b pb-2 mt-4 flex items-center gap-1">
+                        <Receipt className="w-4 h-4 text-emerald-600"/>
+                        收銀分單建議 (同收銀員講)：
+                      </h4>
+                      
+                      {calcBreakdown.breakdown.map(g => {
+                        const pInfo = platforms.find(p => p.id === g.platform);
+                        return (
+                          <div key={g.platform} className="bg-white border border-gray-200 p-3 rounded-xl shadow-sm flex flex-col gap-2 relative overflow-hidden">
+                            <div className={`absolute top-0 left-0 w-1.5 h-full ${pInfo?.color}`}></div>
+                            <div className="flex justify-between items-center pl-2">
+                              <div className="flex items-center gap-2">
+                                <span className={`font-bold text-sm ${pInfo?.text} flex items-center gap-1.5`}>
+                                  <PlatformLogo id={pInfo?.id} className="w-5 h-5 text-[10px]" />
+                                  {pInfo?.name}
+                                </span>
+                                <div className="flex gap-1 flex-wrap">
+                                  {g.vouchers.map((v, idx) => (
+                                    <span key={idx} className={`text-[10px] font-bold text-white px-1.5 py-0.5 rounded shadow-sm ${pInfo?.color}`}>
+                                      券 ${v.amount}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="ml-2 flex justify-between items-center text-sm bg-gray-50 p-2.5 rounded-lg border border-gray-100">
+                              <span className="text-gray-600">請收銀打單：<strong className="text-gray-900 text-lg ml-1">${g.minCharge}</strong></span>
+                              <span className="text-gray-500 text-xs">(你付 ${g.outOfPocket})</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {calcBreakdown.leftover > 0 && (
+                        <div className="ml-2 bg-gray-50 border border-gray-200 border-dashed p-3 rounded-xl flex justify-between items-center">
+                          <span className="text-sm text-gray-600 font-medium">餘額 (隨便點比都得)：</span>
+                          <strong className="text-gray-800 text-lg">${calcBreakdown.leftover}</strong>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    calcInput && Number(calcInput) >= 30 ? (
+                      <div className="text-center py-4 text-orange-500 text-sm bg-orange-50 rounded-xl border border-orange-100 mb-4">
+                        你的券包餘額不足，或沒有合適的面額組合
+                      </div>
+                    ) : null
+                  )}
+
+                  <button 
+                    onClick={handleCalcDeduct}
+                    disabled={bestCombination.length === 0}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl shadow-md transition-colors flex justify-center items-center gap-2"
+                  >
+                    <CheckCircle2 className="w-5 h-5" />
+                    一鍵選取並扣減 {combinations.length > 1 ? `(方案 ${selectedComboIndex + 1})` : ''}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {/* Watermark 專屬標誌 */}
+          <div className="text-center pt-4 pb-2 opacity-40 flex justify-center w-full">
+            <p className="text-[9px] font-bold text-gray-400 tracking-[0.15em] border-t border-gray-100 pt-2 px-6">
+              DESIGNED BY LOMI
+            </p>
+          </div>
+
+        </div>
+
+        {/* 底部導航欄 */}
+        <div className="absolute bottom-0 w-full bg-white border-t border-gray-200 flex justify-between px-1 p-2 pb-6 z-20">
+          <button 
+            onClick={() => setActiveTab('home')}
+            className={`flex flex-col items-center justify-center p-1 rounded-xl flex-1 transition-colors ${activeTab === 'home' ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <Wallet className={`w-5 h-5 mb-1 ${activeTab === 'home' ? 'fill-emerald-100' : ''}`} />
+            <span className="text-[10px] font-bold">券包</span>
+          </button>
+          
+          <button 
+            onClick={() => setActiveTab('add')}
+            className={`flex flex-col items-center justify-center p-1 rounded-xl flex-1 transition-colors ${activeTab === 'add' ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <PlusCircle className={`w-5 h-5 mb-1 ${activeTab === 'add' ? 'fill-emerald-100' : ''}`} />
+            <span className="text-[10px] font-bold">新增</span>
+          </button>
+
+          <button 
+            onClick={() => setActiveTab('calc')}
+            className={`flex flex-col items-center justify-center p-1 rounded-xl flex-1 transition-colors ${activeTab === 'calc' ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <Calculator className={`w-5 h-5 mb-1 ${activeTab === 'calc' ? 'fill-emerald-100' : ''}`} />
+            <span className="text-[10px] font-bold">計數</span>
+          </button>
+          
+          <button 
+            onClick={() => setActiveTab('history')}
+            className={`flex flex-col items-center justify-center p-1 rounded-xl flex-1 transition-colors ${activeTab === 'history' ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <History className={`w-5 h-5 mb-1 ${activeTab === 'history' ? 'fill-emerald-100' : ''}`} />
+            <span className="text-[10px] font-bold">記錄</span>
+          </button>
+        </div>
+
+        {/* 多選操作懸浮列 (Floating Action Bar) */}
+        {selectedVoucherIds.length > 0 && activeTab === 'home' && (
+          <div className="absolute bottom-20 left-4 right-4 bg-gray-800 text-white rounded-2xl p-4 shadow-xl flex justify-between items-center z-30 animate-in slide-in-from-bottom-2">
+            <div>
+              <p className="text-xs text-gray-300 mb-0.5">已選 {selectedVoucherIds.length} 張</p>
+              <p className="text-xl font-bold text-emerald-400">共 ${selectedTotalAmount}</p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={cancelSelection}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-xl text-sm font-bold transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => setShowUseConfirmModal(true)}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 rounded-xl text-sm font-bold shadow-md transition-colors"
+              >
+                確認使用
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 提示訊息 (Toast) */}
+        {toastMsg && (
+          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 bg-gray-800 text-white px-6 py-3 rounded-full shadow-lg z-50 text-sm font-bold animate-in fade-in whitespace-nowrap">
+            {toastMsg}
+          </div>
+        )}
+
+        {/* 重設確認 Modal */}
+        {showResetModal && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4">
+            <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+              <div className="flex items-center gap-3 mb-4 text-gray-800">
+                <Trash2 className="w-6 h-6 text-red-600" />
+                <h3 className="text-xl font-bold">清空資料</h3>
+              </div>
+              <p className="text-gray-600 mb-5 leading-relaxed text-sm">
+                請選擇你要清空的資料類型，清空後將無法復原：
+              </p>
+
+              <div className="space-y-3 mb-6">
+                <button
+                  onClick={() => confirmReset('unused')}
+                  className="w-full py-3 rounded-xl bg-orange-50 text-orange-700 font-bold hover:bg-orange-100 transition-colors flex justify-center items-center gap-2 border border-orange-200"
+                >
+                  <Wallet className="w-4 h-4" />
+                  只清空「我的券包」 (未使用)
+                </button>
+                <button
+                  onClick={() => confirmReset('used')}
+                  className="w-full py-3 rounded-xl bg-blue-50 text-blue-700 font-bold hover:bg-blue-100 transition-colors flex justify-center items-center gap-2 border border-blue-200"
+                >
+                  <History className="w-4 h-4" />
+                  只清空「扣減記錄」 (已使用)
+                </button>
+                <button
+                  onClick={() => confirmReset('all')}
+                  className="w-full py-3 rounded-xl bg-red-50 text-red-700 font-bold hover:bg-red-100 transition-colors flex justify-center items-center gap-2 border border-red-200"
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                  全部清空 (重新開始)
+                </button>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowResetModal(false)}
+                  className="w-full py-3 rounded-xl bg-gray-100 text-gray-700 font-bold hover:bg-gray-200 transition-colors"
+                >
+                  取消返回
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 確認扣減 Modal */}
+        {showUseConfirmModal && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4">
+            <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+              <div className="flex items-center gap-3 mb-4 text-emerald-600">
+                <CheckCircle2 className="w-7 h-7" />
+                <h3 className="text-xl font-bold text-gray-900">確認扣減消費劵</h3>
+              </div>
+              <p className="text-gray-600 mb-2 leading-relaxed">
+                確定要扣減已選的 <span className="font-bold text-gray-900">{selectedVoucherIds.length}</span> 張消費劵嗎？
+              </p>
+              <div className="bg-emerald-50 rounded-xl p-4 mb-6 border border-emerald-100">
+                <p className="text-sm text-emerald-800 font-medium">本次扣減總金額：</p>
+                <p className="text-3xl font-extrabold text-emerald-600">${selectedTotalAmount}</p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowUseConfirmModal(false)}
+                  className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-700 font-bold hover:bg-gray-200 transition-colors"
+                >
+                  返回修改
+                </button>
+                <button
+                  onClick={confirmDeduction}
+                  className="flex-1 py-3 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition-colors"
+                >
+                  確定扣減
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
